@@ -45,7 +45,6 @@ def train_one_model(name, x_train, y_train, x_val, y_val, seed=42):
     theta = np.zeros(spec["param_count"], dtype=np.float64)
     if name == "lightweight":
         theta = rng.normal(0.0, 0.35, size=spec["param_count"])
-
     steps = spec["epochs"]
     batch_size = min(192, len(x_train))
     best_val = -1.0
@@ -94,7 +93,7 @@ def train_one_model(name, x_train, y_train, x_val, y_val, seed=42):
             flush=True,
         )
 
-    return best_params
+    return best_params, best_val
 
 
 def main():
@@ -110,13 +109,15 @@ def main():
     y_train = y[train_idx]
     y_val = y[val_idx]
 
-    baseline_params = train_one_model("baseline", x_train, y_train, x_val, y_val, seed=args.seed)
-    lightweight_params = train_one_model("lightweight", x_train, y_train, x_val, y_val, seed=args.seed + 1)
+    baseline_params, baseline_val = train_one_model("baseline", x_train, y_train, x_val, y_val, seed=args.seed)
+    lightweight_params, lightweight_val = train_one_model("lightweight", x_train, y_train, x_val, y_val, seed=args.seed + 1)
 
     save_artifacts(stats, baseline_params, lightweight_params)
     acc_b, _ = evaluate_numpy(baseline_params, x_val, y_val, "baseline")
     acc_l, _ = evaluate_numpy(lightweight_params, x_val, y_val, "lightweight")
     print(f"saved={artifact_path()}")
+    print(f"selection_val_acc_baseline={baseline_val:.4f}")
+    print(f"selection_val_acc_lightweight={lightweight_val:.4f}")
     print(f"validation_acc_baseline={acc_b:.4f}")
     print(f"validation_acc_lightweight={acc_l:.4f}")
 

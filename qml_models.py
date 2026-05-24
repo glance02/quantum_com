@@ -30,8 +30,8 @@ FEATURE_COLUMNS = [
 ]
 
 MODEL_SPECS = {
-    "baseline": {"num_qubits": 8, "layers": 3, "param_count": 80, "epochs": 18, "lr": 0.035},
-    "lightweight": {"num_qubits": 4, "layers": 2, "param_count": 24, "epochs": 28, "lr": 0.05},
+    "baseline": {"num_qubits": 8, "layers": 3, "param_count": 80, "epochs": 18, "lr": 0.035, "shots": 5000},
+    "lightweight": {"num_qubits": 4, "layers": 2, "param_count": 24, "epochs": 28, "lr": 0.05, "shots": 5000},
 }
 
 _PAIR_CACHE = {}
@@ -66,20 +66,17 @@ def load_csv(path):
 def fit_preprocessor(x):
     lo = np.quantile(x, 0.01, axis=0)
     hi = np.quantile(x, 0.99, axis=0)
-    logged = np.log1p(np.maximum(np.clip(x, lo, hi), 0.0))
-    median = np.median(logged, axis=0)
-    q1 = np.quantile(logged, 0.25, axis=0)
-    q3 = np.quantile(logged, 0.75, axis=0)
-    scale = q3 - q1
+    clipped = np.clip(x, lo, hi)
+    mean = clipped.mean(axis=0)
+    scale = clipped.std(axis=0)
     scale[scale < 1e-8] = 1.0
-    return {"lo": lo, "hi": hi, "median": median, "scale": scale}
+    return {"lo": lo, "hi": hi, "mean": mean, "scale": scale}
 
 
 def transform_features(x, stats):
     clipped = np.clip(x, stats["lo"], stats["hi"])
-    logged = np.log1p(np.maximum(clipped, 0.0))
-    robust = (logged - stats["median"]) / stats["scale"]
-    return (np.clip(robust, -3.0, 3.0) / 3.0 * math.pi).astype(np.float32)
+    standardized = (clipped - stats["mean"]) / stats["scale"]
+    return (np.clip(standardized, -3.0, 3.0) / 3.0 * math.pi).astype(np.float32)
 
 
 def stratified_split(y, val_per_class=86, seed=7):
@@ -173,6 +170,10 @@ def _observable_matrix(num_qubits):
     return _OBS_CACHE[num_qubits]
 
 
+def quantum_feature_dim(num_qubits):
+    return 2 * num_qubits
+
+
 def simulate_quantum_features(x, theta, num_qubits, layers):
     batch = x.shape[0]
     state = np.zeros((batch, 1 << num_qubits), dtype=np.complex128)
@@ -256,7 +257,7 @@ def make_quantum_layer(name):
         spec["param_count"],
         "cpu",
         pauli_str_dict=observables,
-        shots=1000,
+        shots=spec["shots"],
         initializer=zeros,
         name=f"{name}_vqc",
     )
@@ -271,7 +272,7 @@ class HybridQuantumClassifier(Module):
         self.layers = spec["layers"]
         self.param_count = spec["param_count"]
         self.quantum = make_quantum_layer(name)
-        self.readout = Linear(2 * self.num_qubits, 1, weight_initializer=zeros, bias_initializer=zeros)
+        self.readout = Linear(quantum_feature_dim(self.num_qubits), 1, weight_initializer=zeros, bias_initializer=zeros)
 
     def forward(self, x):
         q = self.quantum(x)
@@ -316,14 +317,18 @@ def load_artifacts(path=None):
     if path == artifact_path() and baseline_path.exists() and lightweight_path.exists():
         base = np.load(baseline_path)
         light = np.load(lightweight_path)
-        stats = {key: base[key] for key in ("lo", "hi", "median", "scale")}
+        center_key = "mean" if "mean" in base.files else "median"
+        stats = {key: base[key] for key in ("lo", "hi", "scale")}
+        stats["mean"] = base[center_key]
         params = {}
         params.update({key: base[key] for key in base.files if key not in stats})
         params.update({key: light[key] for key in light.files if key not in stats})
         return stats, params
 
     data = np.load(path)
-    stats = {key: data[key] for key in ("lo", "hi", "median", "scale")}
+    center_key = "mean" if "mean" in data.files else "median"
+    stats = {key: data[key] for key in ("lo", "hi", "scale")}
+    stats["mean"] = data[center_key]
     params = {key: data[key] for key in data.files if key not in stats}
     return stats, params
 
@@ -334,7 +339,7 @@ def save_artifacts(stats, baseline_params, lightweight_params, path=None):
     common_stats = {
         "lo": stats["lo"].astype(np.float32),
         "hi": stats["hi"].astype(np.float32),
-        "median": stats["median"].astype(np.float32),
+        "mean": stats["mean"].astype(np.float32),
         "scale": stats["scale"].astype(np.float32),
     }
     np.savez(model_artifact_path("baseline"), **common_stats, **baseline_params)
