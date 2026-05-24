@@ -1,0 +1,3 @@
+numpy==1.26.4
+pyqpanda3>=0.3.2
+pyvqnet>=2.17.3
