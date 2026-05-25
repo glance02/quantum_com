@@ -63,6 +63,7 @@ def quantum_features(name, x, theta):
         spec["num_qubits"],
         spec["layers"],
         spec.get("active_qubits", spec["num_qubits"]),
+        spec.get("feature_stride", 1),
     )
 
 

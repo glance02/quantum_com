@@ -33,6 +33,7 @@ MODEL_SPECS = {
     "baseline": {
         "num_qubits": 8,
         "active_qubits": 8,
+        "feature_stride": 3,
         "layers": 3,
         "param_count": 80,
         "epochs": 1,
@@ -50,6 +51,7 @@ MODEL_SPECS = {
     "lightweight": {
         "num_qubits": 4,
         "active_qubits": 4,
+        "feature_stride": 1,
         "layers": 2,
         "param_count": 24,
         "epochs": 3,
@@ -90,9 +92,41 @@ def model_artifact_path(name):
 def load_csv(path):
     with open(path, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
-    x = np.array([[float(row[col]) for col in FEATURE_COLUMNS] for row in rows], dtype=np.float64)
+    raw_x = np.array([[float(row[col]) for col in FEATURE_COLUMNS] for row in rows], dtype=np.float64)
+    x = augment_features(raw_x)
     y = np.array([int(row["class"]) for row in rows], dtype=np.float64)
     return x, y
+
+
+def augment_features(x):
+    ma = x[:, 0:6]
+    exudate = x[:, 6:13]
+    distance = x[:, 13]
+    diameter = x[:, 14]
+    am_fm = x[:, 15]
+    eps = 1e-6
+    ma_sum = ma.sum(axis=1)
+    ma_mean = ma.mean(axis=1)
+    exudate_sum = exudate.sum(axis=1)
+    exudate_tail_sum = exudate[:, 3:].sum(axis=1)
+    anatomy_ratio = distance / (diameter + eps)
+
+    engineered = np.stack(
+        [
+            ma_sum,
+            ma[:, 0],
+            ma[:, 0] - ma[:, -1],
+            ma[:, 0] / (ma_mean + eps),
+            exudate_sum,
+            exudate_tail_sum,
+            exudate_tail_sum / (exudate_sum + eps),
+            ma_sum / (exudate_sum + eps),
+            anatomy_ratio,
+            am_fm * anatomy_ratio,
+        ],
+        axis=1,
+    )
+    return np.concatenate([x, engineered], axis=1)
 
 
 def fit_preprocessor(x):
@@ -206,21 +240,35 @@ def quantum_feature_dim(num_qubits):
     return 5 * num_qubits
 
 
-def simulate_quantum_features(x, theta, num_qubits, layers, active_qubits=None):
+def _feature_index(base, feature_dim, stride):
+    return (base * stride + base // feature_dim) % feature_dim
+
+
+def simulate_quantum_features(x, theta, num_qubits, layers, active_qubits=None, feature_stride=1):
     active_qubits = num_qubits if active_qubits is None else active_qubits
     batch = x.shape[0]
     state = np.zeros((batch, 1 << num_qubits), dtype=np.complex128)
     state[:, 0] = 1.0
 
     for q in range(active_qubits):
-        _apply_ry(state, num_qubits, q, x[:, q % x.shape[1]])
-        _apply_rz(state, num_qubits, q, x[:, (q + active_qubits) % x.shape[1]])
+        _apply_ry(state, num_qubits, q, x[:, _feature_index(q, x.shape[1], feature_stride)])
+        _apply_rz(state, num_qubits, q, x[:, _feature_index(q + active_qubits, x.shape[1], feature_stride)])
 
     p = 0
     for layer in range(layers):
         for q in range(active_qubits):
-            _apply_ry(state, num_qubits, q, 0.5 * x[:, (2 * layer * active_qubits + q) % x.shape[1]])
-            _apply_rz(state, num_qubits, q, 0.5 * x[:, (2 * layer * active_qubits + active_qubits + q) % x.shape[1]])
+            _apply_ry(
+                state,
+                num_qubits,
+                q,
+                0.5 * x[:, _feature_index(2 * layer * active_qubits + q, x.shape[1], feature_stride)],
+            )
+            _apply_rz(
+                state,
+                num_qubits,
+                q,
+                0.5 * x[:, _feature_index(2 * layer * active_qubits + active_qubits + q, x.shape[1], feature_stride)],
+            )
 
         for q in range(num_qubits):
             _apply_ry(state, num_qubits, q, theta[p])
@@ -266,18 +314,18 @@ def simulate_quantum_features(x, theta, num_qubits, layers, active_qubits=None):
     ).astype(np.float32)
 
 
-def build_pqanda3_program(x, theta, num_qubits, layers, active_qubits=None):
+def build_pqanda3_program(x, theta, num_qubits, layers, active_qubits=None, feature_stride=1):
     active_qubits = num_qubits if active_qubits is None else active_qubits
     circuit = pq.QCircuit(num_qubits)
     for q in range(active_qubits):
-        circuit << pq.RY(q, x[q % len(x)])
-        circuit << pq.RZ(q, x[(q + active_qubits) % len(x)])
+        circuit << pq.RY(q, x[_feature_index(q, len(x), feature_stride)])
+        circuit << pq.RZ(q, x[_feature_index(q + active_qubits, len(x), feature_stride)])
 
     p = 0
     for layer in range(layers):
         for q in range(active_qubits):
-            circuit << pq.RY(q, 0.5 * x[(2 * layer * active_qubits + q) % len(x)])
-            circuit << pq.RZ(q, 0.5 * x[(2 * layer * active_qubits + active_qubits + q) % len(x)])
+            circuit << pq.RY(q, 0.5 * x[_feature_index(2 * layer * active_qubits + q, len(x), feature_stride)])
+            circuit << pq.RZ(q, 0.5 * x[_feature_index(2 * layer * active_qubits + active_qubits + q, len(x), feature_stride)])
 
         for q in range(num_qubits):
             circuit << pq.RY(q, theta[p])
@@ -304,6 +352,7 @@ def make_quantum_layer(name):
     spec = MODEL_SPECS[name]
     num_qubits = spec["num_qubits"]
     active_qubits = spec.get("active_qubits", num_qubits)
+    feature_stride = spec.get("feature_stride", 1)
     layers = spec["layers"]
     observables = [{f"Z{i}": 1.0} for i in range(num_qubits)]
     observables += [{f"Z{i} Z{(i + 1) % num_qubits}": 1.0} for i in range(num_qubits)]
@@ -312,7 +361,7 @@ def make_quantum_layer(name):
     observables += [{f"X{i} X{(i + 1) % num_qubits}": 1.0} for i in range(num_qubits)]
 
     def qfun(x, theta):
-        return build_pqanda3_program(x, theta, num_qubits, layers, active_qubits)
+        return build_pqanda3_program(x, theta, num_qubits, layers, active_qubits, feature_stride)
 
     return QuantumLayerV3(
         qfun,
@@ -361,6 +410,7 @@ def evaluate_numpy(params, x, y, name):
         spec["num_qubits"],
         spec["layers"],
         spec.get("active_qubits", spec["num_qubits"]),
+        spec.get("feature_stride", 1),
     )
     prob = sigmoid_np(q @ params[f"{name}_weight"].reshape(-1) + float(params[f"{name}_bias"]))
     return accuracy_from_prob(prob, y), prob
