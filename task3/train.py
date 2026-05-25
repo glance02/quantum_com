@@ -1,4 +1,6 @@
 import argparse
+import csv
+import json
 import time
 
 import numpy as np
@@ -17,6 +19,40 @@ from qml_models import (
     stratified_split,
     transform_features,
 )
+
+
+LOG_FIELDS = [
+    "phase",
+    "model",
+    "start",
+    "step",
+    "loss",
+    "train_acc",
+    "cv_acc",
+    "l2",
+    "theta_std",
+    "theta_absmax",
+    "elapsed",
+    "is_best",
+]
+
+
+class TrainingLogger:
+    def __init__(self, log_path):
+        self.log_path = log_path
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.file = self.log_path.open("w", newline="", encoding="utf-8")
+        self.writer = csv.DictWriter(self.file, fieldnames=LOG_FIELDS)
+        self.writer.writeheader()
+        self.file.flush()
+
+    def log_step(self, **row):
+        clean = {field: row.get(field, "") for field in LOG_FIELDS}
+        self.writer.writerow(clean)
+        self.file.flush()
+
+    def close(self):
+        self.file.close()
 
 
 def quantum_features(name, x, theta):
@@ -56,6 +92,49 @@ def readout_accuracy(q, y, readout):
     return float(np.mean((prob >= 0.5).astype(np.int64) == y.astype(np.int64)))
 
 
+def make_cv_splits(y, seeds=(5, 7), val_per_class=64):
+    return [stratified_split(y, val_per_class=val_per_class, seed=seed) for seed in seeds]
+
+
+def fit_best_readout(q, y, l2_grid):
+    best_readout = None
+    best_loss = np.inf
+    best_l2 = None
+    for l2 in l2_grid:
+        readout, loss = fit_readout(q, y, l2=l2)
+        if loss < best_loss:
+            best_loss = loss
+            best_readout = readout
+            best_l2 = l2
+    return best_readout, best_loss, best_l2
+
+
+def evaluate_candidate(name, theta, x, y, cv_splits, l2_grid):
+    q_all = quantum_features(name, x, theta)
+    best_l2 = l2_grid[0]
+    best_cv = -np.inf
+
+    for l2 in l2_grid:
+        fold_scores = []
+        for train_idx, val_idx in cv_splits:
+            readout, _ = fit_readout(q_all[train_idx], y[train_idx], l2=l2)
+            fold_scores.append(readout_accuracy(q_all[val_idx], y[val_idx], readout))
+        cv_acc = float(np.mean(fold_scores))
+        if cv_acc > best_cv:
+            best_cv = cv_acc
+            best_l2 = l2
+
+    readout, train_loss = fit_readout(q_all, y, l2=best_l2)
+    train_acc = readout_accuracy(q_all, y, readout)
+    return {
+        "cv_acc": best_cv,
+        "train_acc": train_acc,
+        "train_loss": train_loss,
+        "readout": readout,
+        "l2": best_l2,
+    }
+
+
 def pack_params(name, theta, readout):
     return {
         f"{name}_theta": theta.astype(np.float32),
@@ -64,49 +143,56 @@ def pack_params(name, theta, readout):
     }
 
 
-def train_one_model(name, x_train, y_train, x_val=None, y_val=None, seed=42):
+def train_one_model(name, x_train, y_train, cv_splits, seed=42, logger=None):
     spec = MODEL_SPECS[name]
-    has_validation = x_val is not None and y_val is not None
-    starts = spec["starts"] if has_validation else 1
-    steps = spec["epochs"] if has_validation else spec["final_epochs"]
+    starts = spec["starts"]
+    steps = spec["epochs"]
     batch_size = min(spec["batch_size"], len(x_train))
+    l2_grid = spec["l2_grid"]
     best_metric = -np.inf
     best_params = None
-    best_val = None
+    best_info = None
     started = time.time()
 
     for start in range(starts):
         rng = np.random.default_rng(seed + 1009 * start)
         theta = rng.normal(0.0, spec["init_scale"], size=spec["param_count"])
-        q_train = quantum_features(name, x_train, theta)
-        readout, train_loss = fit_readout(q_train, y_train)
-        train_acc = readout_accuracy(q_train, y_train, readout)
+        info = evaluate_candidate(name, theta, x_train, y_train, cv_splits, l2_grid)
+        metric = info["cv_acc"]
 
-        if has_validation:
-            q_val = quantum_features(name, x_val, theta)
-            val_acc = readout_accuracy(q_val, y_val, readout)
-            metric = val_acc
-            metric_text = f"val_acc={val_acc:.4f}"
-        else:
-            val_acc = None
-            metric = -train_loss
-            metric_text = "val_acc=NA"
-
-        if metric >= best_metric:
+        is_best = metric >= best_metric
+        if is_best:
             best_metric = metric
-            best_val = val_acc
-            best_params = pack_params(name, theta, readout)
+            best_info = info
+            best_params = pack_params(name, theta, info["readout"])
 
+        elapsed = time.time() - started
         print(
             f"{name:11s} start={start + 1:02d}/{starts:02d} step=000 "
-            f"loss={train_loss:.4f} train_acc={train_acc:.4f} {metric_text} "
-            f"theta_std={theta.std():.3f} elapsed={time.time() - started:.1f}s",
+            f"loss={info['train_loss']:.4f} train_acc={info['train_acc']:.4f} "
+            f"cv_acc={info['cv_acc']:.4f} l2={info['l2']:.3g} "
+            f"theta_std={theta.std():.3f} elapsed={elapsed:.1f}s",
             flush=True,
         )
+        if logger is not None:
+            logger.log_step(
+                phase="candidate",
+                model=name,
+                start=start + 1,
+                step=0,
+                loss=f"{info['train_loss']:.8f}",
+                train_acc=f"{info['train_acc']:.8f}",
+                cv_acc=f"{info['cv_acc']:.8f}",
+                l2=info["l2"],
+                theta_std=f"{theta.std():.8f}",
+                theta_absmax=f"{np.abs(theta).max():.8f}",
+                elapsed=f"{elapsed:.3f}",
+                is_best=int(is_best),
+            )
 
         for step in range(1, steps + 1):
             q_current = quantum_features(name, x_train, theta)
-            readout, train_loss = fit_readout(q_current, y_train)
+            readout, _, _ = fit_best_readout(q_current, y_train, l2_grid)
             batch_idx = rng.choice(len(x_train), size=batch_size, replace=False)
             grad = np.zeros_like(theta)
             c = spec["spsa_c"] / (step ** 0.101)
@@ -130,38 +216,45 @@ def train_one_model(name, x_train, y_train, x_val=None, y_val=None, seed=42):
             theta -= lr * grad
             theta = (theta + np.pi) % (2.0 * np.pi) - np.pi
 
-            q_train = quantum_features(name, x_train, theta)
-            readout, train_loss = fit_readout(q_train, y_train)
-            train_acc = readout_accuracy(q_train, y_train, readout)
+            info = evaluate_candidate(name, theta, x_train, y_train, cv_splits, l2_grid)
+            metric = info["cv_acc"]
 
-            if has_validation:
-                q_val = quantum_features(name, x_val, theta)
-                val_acc = readout_accuracy(q_val, y_val, readout)
-                metric = val_acc
-                metric_text = f"val_acc={val_acc:.4f}"
-            else:
-                val_acc = None
-                metric = -train_loss
-                metric_text = "val_acc=NA"
-
-            if metric >= best_metric:
+            is_best = metric >= best_metric
+            if is_best:
                 best_metric = metric
-                best_val = val_acc
-                best_params = pack_params(name, theta, readout)
+                best_info = info
+                best_params = pack_params(name, theta, info["readout"])
 
+            elapsed = time.time() - started
             print(
                 f"{name:11s} start={start + 1:02d}/{starts:02d} step={step:03d} "
-                f"loss={train_loss:.4f} train_acc={train_acc:.4f} {metric_text} "
-                f"theta_std={theta.std():.3f} elapsed={time.time() - started:.1f}s",
+                f"loss={info['train_loss']:.4f} train_acc={info['train_acc']:.4f} "
+                f"cv_acc={info['cv_acc']:.4f} l2={info['l2']:.3g} "
+                f"theta_std={theta.std():.3f} elapsed={elapsed:.1f}s",
                 flush=True,
             )
+            if logger is not None:
+                logger.log_step(
+                    phase="spsa",
+                    model=name,
+                    start=start + 1,
+                    step=step,
+                    loss=f"{info['train_loss']:.8f}",
+                    train_acc=f"{info['train_acc']:.8f}",
+                    cv_acc=f"{info['cv_acc']:.8f}",
+                    l2=info["l2"],
+                    theta_std=f"{theta.std():.8f}",
+                    theta_absmax=f"{np.abs(theta).max():.8f}",
+                    elapsed=f"{elapsed:.3f}",
+                    is_best=int(is_best),
+                )
 
-    return best_params, best_val
+    return best_params, best_info
 
 
-def refit_readout_on_full_train(name, theta, x_full, y_full):
+def refit_readout_on_full_train(name, theta, x_full, y_full, l2):
     q_full = quantum_features(name, x_full, theta)
-    readout, _ = fit_readout(q_full, y_full)
+    readout, _ = fit_readout(q_full, y_full, l2=l2)
     return pack_params(name, theta, readout)
 
 
@@ -170,34 +263,59 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
+    log_path = artifact_path().parent / "train_log.csv"
+    summary_path = artifact_path().parent / "train_summary.json"
+    logger = TrainingLogger(log_path)
+
     x, y = load_csv(data_path("train.csv"))
-    train_idx, val_idx = stratified_split(y, seed=7)
     stats = fit_preprocessor(x)
-    x_train = transform_features(x[train_idx], stats)
-    x_val = transform_features(x[val_idx], stats)
-    y_train = y[train_idx]
-    y_val = y[val_idx]
-
-    baseline_params, baseline_val = train_one_model("baseline", x_train, y_train, x_val, y_val, seed=args.seed)
-    lightweight_params, lightweight_val = train_one_model("lightweight", x_train, y_train, x_val, y_val, seed=0)
-
     x_full = transform_features(x, stats)
+    cv_splits = make_cv_splits(y)
+
+    try:
+        baseline_params, baseline_info = train_one_model("baseline", x_full, y, cv_splits, seed=args.seed, logger=logger)
+        lightweight_params, lightweight_info = train_one_model("lightweight", x_full, y, cv_splits, seed=0, logger=logger)
+    finally:
+        logger.close()
+
     baseline_params = refit_readout_on_full_train(
-        "baseline", baseline_params["baseline_theta"], x_full, y
+        "baseline", baseline_params["baseline_theta"], x_full, y, baseline_info["l2"]
     )
     lightweight_params = refit_readout_on_full_train(
-        "lightweight", lightweight_params["lightweight_theta"], x_full, y
+        "lightweight", lightweight_params["lightweight_theta"], x_full, y, lightweight_info["l2"]
     )
 
     save_artifacts(stats, baseline_params, lightweight_params)
-    x_val_final = transform_features(x[val_idx], stats)
-    acc_b, _ = evaluate_numpy(baseline_params, x_val_final, y_val, "baseline")
-    acc_l, _ = evaluate_numpy(lightweight_params, x_val_final, y_val, "lightweight")
+    acc_b, _ = evaluate_numpy(baseline_params, x_full, y, "baseline")
+    acc_l, _ = evaluate_numpy(lightweight_params, x_full, y, "lightweight")
+    summary = {
+        "artifact_path": str(artifact_path()),
+        "log_path": str(log_path),
+        "baseline": {
+            "selection_cv_acc": baseline_info["cv_acc"],
+            "selection_l2": baseline_info["l2"],
+            "train_acc": acc_b,
+            "theta_std": float(baseline_params["baseline_theta"].std()),
+            "theta_absmax": float(np.abs(baseline_params["baseline_theta"]).max()),
+        },
+        "lightweight": {
+            "selection_cv_acc": lightweight_info["cv_acc"],
+            "selection_l2": lightweight_info["l2"],
+            "train_acc": acc_l,
+            "theta_std": float(lightweight_params["lightweight_theta"].std()),
+            "theta_absmax": float(np.abs(lightweight_params["lightweight_theta"]).max()),
+        },
+    }
+    with summary_path.open("w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
     print(f"saved={artifact_path()}")
-    print(f"selection_val_acc_baseline={baseline_val:.4f}")
-    print(f"selection_val_acc_lightweight={lightweight_val:.4f}")
-    print(f"validation_acc_baseline={acc_b:.4f}")
-    print(f"validation_acc_lightweight={acc_l:.4f}")
+    print(f"log={log_path}")
+    print(f"summary={summary_path}")
+    print(f"selection_cv_acc_baseline={baseline_info['cv_acc']:.4f} l2={baseline_info['l2']:.3g}")
+    print(f"selection_cv_acc_lightweight={lightweight_info['cv_acc']:.4f} l2={lightweight_info['l2']:.3g}")
+    print(f"train_acc_baseline={acc_b:.4f}")
+    print(f"train_acc_lightweight={acc_l:.4f}")
 
 
 if __name__ == "__main__":

@@ -11,12 +11,16 @@ from qml_models import (
 from pyvqnet.tensor import QTensor
 
 
-def evaluate_vqnet(params, x, y, name):
+def evaluate_vqnet(params, x, y, name, repeats=5):
     model = HybridQuantumClassifier(name)
     model.quantum.m_para.init_from_tensor(QTensor(params[f"{name}_theta"].astype("float32")))
     model.readout.weights.init_from_tensor(QTensor(params[f"{name}_weight"].astype("float32")))
     model.readout.bias.init_from_tensor(QTensor(params[f"{name}_bias"].astype("float32")))
-    pred, _ = model.predict_numpy(x)
+    prob_sum = None
+    for _ in range(repeats):
+        _, prob = model.predict_numpy(x)
+        prob_sum = prob if prob_sum is None else prob_sum + prob
+    pred = (prob_sum / repeats >= 0.5).astype("int64")
     return float((pred == y.astype("int64")).mean())
 
 

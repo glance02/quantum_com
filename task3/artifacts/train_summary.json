@@ -1,0 +1,18 @@
+{
+  "artifact_path": "D:\\code\\python\\Quantun\\task3\\artifacts\\qml_artifacts.npz",
+  "log_path": "D:\\code\\python\\Quantun\\task3\\artifacts\\train_log.csv",
+  "baseline": {
+    "selection_cv_acc": 0.703125,
+    "selection_l2": 0.005,
+    "train_acc": 0.7118055555555556,
+    "theta_std": 0.4834114611148834,
+    "theta_absmax": 1.4207682609558105
+  },
+  "lightweight": {
+    "selection_cv_acc": 0.74609375,
+    "selection_l2": 0.01,
+    "train_acc": 0.7175925925925926,
+    "theta_std": 0.6230058073997498,
+    "theta_absmax": 1.714734673500061
+  }
+}

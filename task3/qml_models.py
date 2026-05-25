@@ -32,26 +32,27 @@ FEATURE_COLUMNS = [
 MODEL_SPECS = {
     "baseline": {
         "num_qubits": 8,
-        "active_qubits": 4,
+        "active_qubits": 8,
         "layers": 3,
         "param_count": 80,
-        "epochs": 4,
+        "epochs": 1,
         "final_epochs": 4,
-        "starts": 25,
+        "starts": 8,
         "batch_size": 256,
         "lr": 0.12,
         "init_scale": 0.5,
         "spsa_c": 0.18,
-        "spsa_repeats": 2,
+        "spsa_repeats": 1,
         "grad_clip": 2.5,
-        "shots": 12000,
+        "l2_grid": [0.005, 0.01, 0.02],
+        "shots": 30000,
     },
     "lightweight": {
         "num_qubits": 4,
         "active_qubits": 4,
         "layers": 2,
         "param_count": 24,
-        "epochs": 6,
+        "epochs": 3,
         "final_epochs": 6,
         "starts": 25,
         "batch_size": 256,
@@ -60,7 +61,8 @@ MODEL_SPECS = {
         "spsa_c": 0.2,
         "spsa_repeats": 3,
         "grad_clip": 2.5,
-        "shots": 12000,
+        "l2_grid": [0.005, 0.01, 0.02],
+        "shots": 30000,
     },
 }
 
@@ -201,7 +203,7 @@ def _observable_matrix(num_qubits):
 
 
 def quantum_feature_dim(num_qubits):
-    return 3 * num_qubits
+    return 5 * num_qubits
 
 
 def simulate_quantum_features(x, theta, num_qubits, layers, active_qubits=None):
@@ -241,8 +243,27 @@ def simulate_quantum_features(x, theta, num_qubits, layers, active_qubits=None):
     x_features = []
     for q in range(num_qubits):
         zero_idx, one_idx = _qubit_pairs(num_qubits, q)
-        x_features.append(2.0 * np.real(np.conj(state[:, zero_idx]) * state[:, one_idx]).sum(axis=1))
-    return np.concatenate([diagonal_features, np.stack(x_features, axis=1)], axis=1).astype(np.float32)
+        coherence = np.conj(state[:, zero_idx]) * state[:, one_idx]
+        x_features.append(2.0 * np.real(coherence).sum(axis=1))
+    y_features = []
+    for q in range(num_qubits):
+        zero_idx, one_idx = _qubit_pairs(num_qubits, q)
+        coherence = np.conj(state[:, zero_idx]) * state[:, one_idx]
+        y_features.append(2.0 * np.imag(coherence).sum(axis=1))
+    basis = np.arange(1 << num_qubits)
+    xx_features = []
+    for q in range(num_qubits):
+        mask = (1 << q) | (1 << ((q + 1) % num_qubits))
+        xx_features.append(np.real(np.sum(np.conj(state) * state[:, basis ^ mask], axis=1)))
+    return np.concatenate(
+        [
+            diagonal_features,
+            np.stack(x_features, axis=1),
+            np.stack(y_features, axis=1),
+            np.stack(xx_features, axis=1),
+        ],
+        axis=1,
+    ).astype(np.float32)
 
 
 def build_pqanda3_program(x, theta, num_qubits, layers, active_qubits=None):
@@ -287,6 +308,8 @@ def make_quantum_layer(name):
     observables = [{f"Z{i}": 1.0} for i in range(num_qubits)]
     observables += [{f"Z{i} Z{(i + 1) % num_qubits}": 1.0} for i in range(num_qubits)]
     observables += [{f"X{i}": 1.0} for i in range(num_qubits)]
+    observables += [{f"Y{i}": 1.0} for i in range(num_qubits)]
+    observables += [{f"X{i} X{(i + 1) % num_qubits}": 1.0} for i in range(num_qubits)]
 
     def qfun(x, theta):
         return build_pqanda3_program(x, theta, num_qubits, layers, active_qubits)
