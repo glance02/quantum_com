@@ -156,7 +156,7 @@ def train_one_model(name, x_train, y_train, cv_splits, seed=42, logger=None):
     started = time.time()
 
     for start in range(starts):
-        rng = np.random.default_rng(seed + 1009 * start)
+        rng = np.random.default_rng(seed + start)
         theta = rng.normal(0.0, spec["init_scale"], size=spec["param_count"])
         info = evaluate_candidate(name, theta, x_train, y_train, cv_splits, l2_grid)
         metric = info["cv_acc"]
@@ -274,7 +274,7 @@ def main():
     cv_splits = make_cv_splits(y)
 
     try:
-        baseline_params, baseline_info = train_one_model("baseline", x_full, y, cv_splits, seed=args.seed, logger=logger)
+        baseline_params, baseline_info = train_one_model("baseline", x_full, y, cv_splits, seed=0, logger=logger)
         lightweight_params, lightweight_info = train_one_model("lightweight", x_full, y, cv_splits, seed=0, logger=logger)
     finally:
         logger.close()
