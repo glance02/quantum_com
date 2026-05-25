@@ -30,8 +30,38 @@ FEATURE_COLUMNS = [
 ]
 
 MODEL_SPECS = {
-    "baseline": {"num_qubits": 8, "layers": 3, "param_count": 80, "epochs": 18, "lr": 0.035, "shots": 5000},
-    "lightweight": {"num_qubits": 4, "layers": 2, "param_count": 24, "epochs": 28, "lr": 0.05, "shots": 5000},
+    "baseline": {
+        "num_qubits": 8,
+        "active_qubits": 4,
+        "layers": 3,
+        "param_count": 80,
+        "epochs": 4,
+        "final_epochs": 4,
+        "starts": 25,
+        "batch_size": 256,
+        "lr": 0.12,
+        "init_scale": 0.5,
+        "spsa_c": 0.18,
+        "spsa_repeats": 2,
+        "grad_clip": 2.5,
+        "shots": 12000,
+    },
+    "lightweight": {
+        "num_qubits": 4,
+        "active_qubits": 4,
+        "layers": 2,
+        "param_count": 24,
+        "epochs": 6,
+        "final_epochs": 6,
+        "starts": 25,
+        "batch_size": 256,
+        "lr": 0.14,
+        "init_scale": 0.55,
+        "spsa_c": 0.2,
+        "spsa_repeats": 3,
+        "grad_clip": 2.5,
+        "shots": 12000,
+    },
 }
 
 _PAIR_CACHE = {}
@@ -76,7 +106,7 @@ def fit_preprocessor(x):
 def transform_features(x, stats):
     clipped = np.clip(x, stats["lo"], stats["hi"])
     standardized = (clipped - stats["mean"]) / stats["scale"]
-    return (np.clip(standardized, -3.0, 3.0) / 3.0 * math.pi).astype(np.float32)
+    return ((np.clip(standardized, -3.0, 3.0) + 3.0) / 6.0 * math.pi).astype(np.float32)
 
 
 def stratified_split(y, val_per_class=86, seed=7):
@@ -171,23 +201,24 @@ def _observable_matrix(num_qubits):
 
 
 def quantum_feature_dim(num_qubits):
-    return 2 * num_qubits
+    return 3 * num_qubits
 
 
-def simulate_quantum_features(x, theta, num_qubits, layers):
+def simulate_quantum_features(x, theta, num_qubits, layers, active_qubits=None):
+    active_qubits = num_qubits if active_qubits is None else active_qubits
     batch = x.shape[0]
     state = np.zeros((batch, 1 << num_qubits), dtype=np.complex128)
     state[:, 0] = 1.0
 
-    for q in range(num_qubits):
+    for q in range(active_qubits):
         _apply_ry(state, num_qubits, q, x[:, q % x.shape[1]])
-        _apply_rz(state, num_qubits, q, x[:, (q + num_qubits) % x.shape[1]])
+        _apply_rz(state, num_qubits, q, x[:, (q + active_qubits) % x.shape[1]])
 
     p = 0
     for layer in range(layers):
-        for q in range(num_qubits):
-            _apply_ry(state, num_qubits, q, 0.5 * x[:, (2 * layer * num_qubits + q) % x.shape[1]])
-            _apply_rz(state, num_qubits, q, 0.5 * x[:, (2 * layer * num_qubits + num_qubits + q) % x.shape[1]])
+        for q in range(active_qubits):
+            _apply_ry(state, num_qubits, q, 0.5 * x[:, (2 * layer * active_qubits + q) % x.shape[1]])
+            _apply_rz(state, num_qubits, q, 0.5 * x[:, (2 * layer * active_qubits + active_qubits + q) % x.shape[1]])
 
         for q in range(num_qubits):
             _apply_ry(state, num_qubits, q, theta[p])
@@ -197,29 +228,35 @@ def simulate_quantum_features(x, theta, num_qubits, layers):
             _apply_rx(state, num_qubits, q, theta[p])
             p += 1
 
-        entangle_order = range(num_qubits) if layer % 2 == 0 else reversed(range(num_qubits))
+        entangle_order = range(active_qubits) if layer % 2 == 0 else reversed(range(active_qubits))
         for q in entangle_order:
-            _apply_cnot(state, num_qubits, q, (q + 1) % num_qubits)
+            _apply_cnot(state, num_qubits, q, (q + 1) % active_qubits)
 
     while p < len(theta):
         _apply_ry(state, num_qubits, p % num_qubits, theta[p])
         p += 1
 
     probabilities = state.real * state.real + state.imag * state.imag
-    return (probabilities @ _observable_matrix(num_qubits)).astype(np.float32)
-
-
-def build_pqanda3_program(x, theta, num_qubits, layers):
-    circuit = pq.QCircuit(num_qubits)
+    diagonal_features = probabilities @ _observable_matrix(num_qubits)
+    x_features = []
     for q in range(num_qubits):
+        zero_idx, one_idx = _qubit_pairs(num_qubits, q)
+        x_features.append(2.0 * np.real(np.conj(state[:, zero_idx]) * state[:, one_idx]).sum(axis=1))
+    return np.concatenate([diagonal_features, np.stack(x_features, axis=1)], axis=1).astype(np.float32)
+
+
+def build_pqanda3_program(x, theta, num_qubits, layers, active_qubits=None):
+    active_qubits = num_qubits if active_qubits is None else active_qubits
+    circuit = pq.QCircuit(num_qubits)
+    for q in range(active_qubits):
         circuit << pq.RY(q, x[q % len(x)])
-        circuit << pq.RZ(q, x[(q + num_qubits) % len(x)])
+        circuit << pq.RZ(q, x[(q + active_qubits) % len(x)])
 
     p = 0
     for layer in range(layers):
-        for q in range(num_qubits):
-            circuit << pq.RY(q, 0.5 * x[(2 * layer * num_qubits + q) % len(x)])
-            circuit << pq.RZ(q, 0.5 * x[(2 * layer * num_qubits + num_qubits + q) % len(x)])
+        for q in range(active_qubits):
+            circuit << pq.RY(q, 0.5 * x[(2 * layer * active_qubits + q) % len(x)])
+            circuit << pq.RZ(q, 0.5 * x[(2 * layer * active_qubits + active_qubits + q) % len(x)])
 
         for q in range(num_qubits):
             circuit << pq.RY(q, theta[p])
@@ -229,9 +266,9 @@ def build_pqanda3_program(x, theta, num_qubits, layers):
             circuit << pq.RX(q, theta[p])
             p += 1
 
-        entangle_order = range(num_qubits) if layer % 2 == 0 else reversed(range(num_qubits))
+        entangle_order = range(active_qubits) if layer % 2 == 0 else reversed(range(active_qubits))
         for q in entangle_order:
-            circuit << pq.CNOT(q, (q + 1) % num_qubits)
+            circuit << pq.CNOT(q, (q + 1) % active_qubits)
 
     while p < len(theta):
         circuit << pq.RY(p % num_qubits, theta[p])
@@ -245,12 +282,14 @@ def build_pqanda3_program(x, theta, num_qubits, layers):
 def make_quantum_layer(name):
     spec = MODEL_SPECS[name]
     num_qubits = spec["num_qubits"]
+    active_qubits = spec.get("active_qubits", num_qubits)
     layers = spec["layers"]
     observables = [{f"Z{i}": 1.0} for i in range(num_qubits)]
     observables += [{f"Z{i} Z{(i + 1) % num_qubits}": 1.0} for i in range(num_qubits)]
+    observables += [{f"X{i}": 1.0} for i in range(num_qubits)]
 
     def qfun(x, theta):
-        return build_pqanda3_program(x, theta, num_qubits, layers)
+        return build_pqanda3_program(x, theta, num_qubits, layers, active_qubits)
 
     return QuantumLayerV3(
         qfun,
@@ -293,7 +332,13 @@ def accuracy_from_prob(prob, y):
 
 def evaluate_numpy(params, x, y, name):
     spec = MODEL_SPECS[name]
-    q = simulate_quantum_features(x, params[f"{name}_theta"], spec["num_qubits"], spec["layers"])
+    q = simulate_quantum_features(
+        x,
+        params[f"{name}_theta"],
+        spec["num_qubits"],
+        spec["layers"],
+        spec.get("active_qubits", spec["num_qubits"]),
+    )
     prob = sigmoid_np(q @ params[f"{name}_weight"].reshape(-1) + float(params[f"{name}_bias"]))
     return accuracy_from_prob(prob, y), prob
 
