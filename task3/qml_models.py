@@ -412,7 +412,8 @@ def evaluate_numpy(params, x, y, name):
         spec.get("active_qubits", spec["num_qubits"]),
         spec.get("feature_stride", 1),
     )
-    prob = sigmoid_np(q @ params[f"{name}_weight"].reshape(-1) + float(params[f"{name}_bias"]))
+    bias = float(params[f"{name}_bias"].reshape(-1)[0])
+    prob = sigmoid_np(q @ params[f"{name}_weight"].reshape(-1) + bias)
     return accuracy_from_prob(prob, y), prob
 
 
