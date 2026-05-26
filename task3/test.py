@@ -1,10 +1,10 @@
 from qml_models import (
     MODEL_SPECS,
     HybridQuantumClassifier,
-    artifact_path,
     data_path,
     load_artifacts,
     load_csv,
+    model_artifact_path,
     score,
     transform_features,
 )
@@ -25,8 +25,12 @@ def evaluate_vqnet(params, x, y, name, repeats=5):
 
 
 def main():
-    if not artifact_path().exists():
-        raise FileNotFoundError(f"Missing trained artifact: {artifact_path()}. Please run train.py first.")
+    baseline_path = model_artifact_path("baseline")
+    lightweight_path = model_artifact_path("lightweight")
+    if not baseline_path.exists() or not lightweight_path.exists():
+        raise FileNotFoundError(
+            f"Missing trained model files: {baseline_path} and {lightweight_path}. Please run train.py first."
+        )
 
     stats, params = load_artifacts()
     x_test, y_test = load_csv(data_path("test.csv"))

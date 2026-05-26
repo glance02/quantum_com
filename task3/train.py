@@ -8,11 +8,12 @@ from scipy.optimize import minimize
 
 from qml_models import (
     MODEL_SPECS,
-    artifact_path,
+    artifacts_dir,
     data_path,
     evaluate_numpy,
     fit_preprocessor,
     load_csv,
+    model_artifact_path,
     save_artifacts,
     sigmoid_np,
     simulate_quantum_features,
@@ -264,8 +265,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    log_path = artifact_path().parent / "train_log.csv"
-    summary_path = artifact_path().parent / "train_summary.json"
+    log_path = artifacts_dir() / "train_log.csv"
+    summary_path = artifacts_dir() / "train_summary.json"
     logger = TrainingLogger(log_path)
 
     x, y = load_csv(data_path("train.csv"))
@@ -290,7 +291,8 @@ def main():
     acc_b, _ = evaluate_numpy(baseline_params, x_full, y, "baseline")
     acc_l, _ = evaluate_numpy(lightweight_params, x_full, y, "lightweight")
     summary = {
-        "artifact_path": str(artifact_path()),
+        "baseline_model_path": str(model_artifact_path("baseline")),
+        "lightweight_model_path": str(model_artifact_path("lightweight")),
         "log_path": str(log_path),
         "baseline": {
             "selection_cv_acc": baseline_info["cv_acc"],
@@ -310,7 +312,8 @@ def main():
     with summary_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
-    print(f"saved={artifact_path()}")
+    print(f"saved_baseline={model_artifact_path('baseline')}")
+    print(f"saved_lightweight={model_artifact_path('lightweight')}")
     print(f"log={log_path}")
     print(f"summary={summary_path}")
     print(f"selection_cv_acc_baseline={baseline_info['cv_acc']:.4f} l2={baseline_info['l2']:.3g}")

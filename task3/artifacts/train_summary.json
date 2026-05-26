@@ -1,5 +1,6 @@
 {
-  "artifact_path": "D:\\code\\python\\Quantun\\task3\\artifacts\\qml_artifacts.npz",
+  "baseline_model_path": "D:\\code\\python\\Quantun\\task3\\artifacts\\baseline_model.npz",
+  "lightweight_model_path": "D:\\code\\python\\Quantun\\task3\\artifacts\\lightweight_model.npz",
   "log_path": "D:\\code\\python\\Quantun\\task3\\artifacts\\train_log.csv",
   "baseline": {
     "selection_cv_acc": 0.78125,

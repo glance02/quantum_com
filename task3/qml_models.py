@@ -81,12 +81,12 @@ def data_path(name):
     return project_root() / "data" / name
 
 
-def artifact_path():
-    return project_root() / "artifacts" / "qml_artifacts.npz"
+def artifacts_dir():
+    return project_root() / "artifacts"
 
 
 def model_artifact_path(name):
-    return project_root() / "artifacts" / f"{name}_model.npz"
+    return artifacts_dir() / f"{name}_model.npz"
 
 
 def load_csv(path):
@@ -428,32 +428,22 @@ def extract_params(model):
     }
 
 
-def load_artifacts(path=None):
-    path = artifact_path() if path is None else Path(path)
+def load_artifacts():
     baseline_path = model_artifact_path("baseline")
     lightweight_path = model_artifact_path("lightweight")
-    if path == artifact_path() and baseline_path.exists() and lightweight_path.exists():
-        base = np.load(baseline_path)
-        light = np.load(lightweight_path)
-        center_key = "mean" if "mean" in base.files else "median"
-        stats = {key: base[key] for key in ("lo", "hi", "scale")}
-        stats["mean"] = base[center_key]
-        params = {}
-        params.update({key: base[key] for key in base.files if key not in stats})
-        params.update({key: light[key] for key in light.files if key not in stats})
-        return stats, params
-
-    data = np.load(path)
-    center_key = "mean" if "mean" in data.files else "median"
-    stats = {key: data[key] for key in ("lo", "hi", "scale")}
-    stats["mean"] = data[center_key]
-    params = {key: data[key] for key in data.files if key not in stats}
+    base = np.load(baseline_path)
+    light = np.load(lightweight_path)
+    center_key = "mean" if "mean" in base.files else "median"
+    stats = {key: base[key] for key in ("lo", "hi", "scale")}
+    stats["mean"] = base[center_key]
+    params = {}
+    params.update({key: base[key] for key in base.files if key not in stats})
+    params.update({key: light[key] for key in light.files if key not in stats})
     return stats, params
 
 
-def save_artifacts(stats, baseline_params, lightweight_params, path=None):
-    path = artifact_path() if path is None else Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+def save_artifacts(stats, baseline_params, lightweight_params):
+    artifacts_dir().mkdir(parents=True, exist_ok=True)
     common_stats = {
         "lo": stats["lo"].astype(np.float32),
         "hi": stats["hi"].astype(np.float32),
@@ -462,12 +452,6 @@ def save_artifacts(stats, baseline_params, lightweight_params, path=None):
     }
     np.savez(model_artifact_path("baseline"), **common_stats, **baseline_params)
     np.savez(model_artifact_path("lightweight"), **common_stats, **lightweight_params)
-    np.savez(
-        path,
-        **common_stats,
-        **baseline_params,
-        **lightweight_params,
-    )
 
 
 def score(acc_b, acc_l):

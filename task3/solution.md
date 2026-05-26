@@ -53,7 +53,7 @@ task3/artifacts/baseline_model.npz
 task3/artifacts/lightweight_model.npz
 ```
 
-同时额外保留一个合并文件 `task3/artifacts/qml_artifacts.npz` 作为兼容备份。`test.py` 不依赖训练流程，优先加载两个独立模型文件，并使用 `pyvqnet` 的 `QuantumLayerV3` 和 `pyqpanda3` 构造量子线路完成评估。为降低有限 shots 采样带来的预测抖动，测试阶段对同一模型重复推理数次并平均概率后再做阈值分类。
+`test.py` 不依赖训练流程，只加载这两个独立模型文件，并使用 `pyvqnet` 的 `QuantumLayerV3` 和 `pyqpanda3` 构造量子线路完成评估。为降低有限 shots 采样带来的预测抖动，测试阶段对同一模型重复推理数次并平均概率后再做阈值分类。
 
 ## 实验结果
 
